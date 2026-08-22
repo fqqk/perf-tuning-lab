@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+apps/nodejs/node_modules/
+
+# Ruby
+apps/ruby/.bundle/
+apps/ruby/vendor/bundle/
+
+# Grafana runtime data (created by docker-compose volume mount)
+monitoring/grafana/
+
+# OS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Profiler output
+tmp/
+*.dump
+*.heapsnapshot

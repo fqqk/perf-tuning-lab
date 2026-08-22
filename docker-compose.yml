@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # Scenario 1-4 用共通環境（ネットワーク遅延注入可能）
+  # 使用例: docker exec chaos-nodejs node app.js
+
+  chaos-nodejs:
+    image: node:26-alpine
+    container_name: chaos-nodejs
+    working_dir: /app
+    volumes:
+      - ./apps/nodejs:/app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    cap_add:
+      - NET_ADMIN                  # ネットワーク遅延注入用
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'              # Chaos Lab: CPU 1コアに制限
+          memory: 512M             # Chaos Lab: メモリ 512MB に制限
+    command: sh -c "apk add --no-cache iproute2 && npm install && npm run dev"
+
+  chaos-ruby:
+    image: ruby:3.3-alpine
+    container_name: chaos-ruby
+    working_dir: /app
+    volumes:
+      - ./apps/ruby:/app
+    ports:
+      - "3001:3000"
+    environment:
+      - RAILS_ENV=development
+    cap_add:
+      - NET_ADMIN
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    command: sh -c "apk add --no-cache build-base iproute2 && bundle install && bundle exec puma -b tcp://0.0.0.0:3000 config.ru"
+
+  chaos-go:
+    image: golang:1.23-alpine
+    container_name: chaos-go
+    working_dir: /app
+    volumes:
+      - ./apps/go:/app
+    ports:
+      - "3002:3000"
+    cap_add:
+      - NET_ADMIN
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    command: sh -c "apk add --no-cache iproute2 && go run main.go"
+
+  # モニタリング (オプション)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: chaos-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    command: --config.file=/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: chaos-grafana
+    ports:
+      - "3010:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana:/var/lib/grafana
