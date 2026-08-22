@@ -34,11 +34,6 @@ import { Trend, Rate, Counter } from 'k6/metrics';
 // カスタムメトリクス
 // ============================================================
 
-// レスポンスタイム
-const responseTime = new Trend('http_req_duration');
-const p99Latency = new Trend('p99_latency');
-const p95Latency = new Trend('p95_latency');
-
 // エラー率
 const errorRate = new Rate('errors');
 const successRate = new Rate('successes');
@@ -107,20 +102,16 @@ export default function () {
       console.error(`Request failed: ${res.status} - ${res.body}`);
     }
 
-    // レスポンスタイムを記録
-    responseTime.add(res.timings.duration);
-    p95Latency.add(res.timings.duration);
-    p99Latency.add(res.timings.duration);
-
     // リクエスト間に少し待機
     sleep(1);
   });
 }
 
 /**
- * テスト終了時の結果サマリー
+ * テスト終了時のガイド表示
+ * （k6 標準サマリーはこの後に別途出力される）
  */
-export function handleSummary(data) {
+export function teardown() {
   console.log('=== Scenario 1: アプサバモデル特性テスト結果 ===');
   console.log(`
   テスト概要:
@@ -150,6 +141,4 @@ export function handleSummary(data) {
 
   3. 再計測でビフォーアフター比較
   `);
-
-  return {};
 }
