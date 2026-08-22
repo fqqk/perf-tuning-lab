@@ -1,6 +1,9 @@
 const express = require('express');
 const compression = require('compression');
 const pino = require('pino');
+const { Worker } = require('worker_threads');
+const path = require('path');
+const os = require('os');
 
 const app = express();
 const logger = pino();
@@ -9,39 +12,90 @@ const logger = pino();
 app.use(compression());
 
 // ============================================================
+// Worker Pool: CPU 計算用
+// ============================================================
+
+const WORKER_COUNT = os.cpus().length;
+const workerPool = [];
+let currentWorkerIndex = 0;
+
+// ワーカープール初期化
+for (let i = 0; i < WORKER_COUNT; i++) {
+  const worker = new Worker(path.join(__dirname, 'worker.js'));
+  workerPool.push(worker);
+}
+
+/**
+ * ワーカープールから CPU 計算を実行（ラウンドロビン）
+ */
+function runCpuComputeInWorker(durationMs) {
+  return new Promise((resolve, reject) => {
+    const worker = workerPool[currentWorkerIndex];
+    currentWorkerIndex = (currentWorkerIndex + 1) % WORKER_COUNT;
+
+    const timeout = setTimeout(() => {
+      reject(new Error('Worker timeout'));
+    }, durationMs + 1000);
+
+    const messageHandler = (message) => {
+      if (message.type === 'cpu-compute-result') {
+        clearTimeout(timeout);
+        worker.off('message', messageHandler);
+        worker.off('error', errorHandler);
+        resolve(message.result);
+      }
+    };
+
+    const errorHandler = (err) => {
+      clearTimeout(timeout);
+      worker.off('message', messageHandler);
+      worker.off('error', errorHandler);
+      reject(err);
+    };
+
+    worker.on('message', messageHandler);
+    worker.on('error', errorHandler);
+
+    // ワーカーに CPU 計算タスクを送信
+    worker.postMessage({
+      type: 'cpu-compute',
+      durationMs: durationMs
+    });
+  });
+}
+
+// ============================================================
 // Scenario 1: CPU計算 + I/O混在処理
 // ============================================================
 
 /**
  * GET /cpu-io-mixed
  *
- * 1. CPU計算（100ms）：複雑な計算、JSON encode
- * 2. I/O待ち（100ms）：sleep（通常はDB query）
- * 3. レスポンス返却
+ * チューニング版: CPU計算をワーカースレッドへオフロード
  *
- * 目的: イベントループのブロックを観察
+ * 1. CPU計算（100ms）：worker_threads で実行（Event Loop ブロックなし）
+ * 2. I/O待ち（100ms）：並行で実行（CPU 計算中に他のリクエスト処理可能）
+ * 3. レスポンス返却
  */
 app.get('/cpu-io-mixed', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    // (1) CPU計算（100ms相当）
-    const cpuStart = Date.now();
-    let result = 0;
-    while (Date.now() - cpuStart < 100) {
-      // 複雑な計算を繰り返す（イベントループを占有）
-      result += Math.sqrt(Math.random() * 10000);
-    }
+    // (1) CPU計算と I/O待ちを並行実行
+    // ← worker_threads で CPU 計算は別スレッドへ
+    // ← Event Loop は I/O 待ち中も他のリクエスト処理可能
+    const [cpuResult] = await Promise.all([
+      runCpuComputeInWorker(100),  // worker_threads: CPU 計算（イベントループをブロックしない）
+      new Promise(resolve => setTimeout(resolve, 100))  // I/O 待ち
+    ]);
 
-    // (2) I/O待ち（100ms相当）
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    // (3) レスポンス
+    // (2) レスポンス
     res.json({
       status: 'ok',
       totalTime: Date.now() - startTime,
-      cpu_blocked_ms: cpuStart - startTime + 100,
-      io_wait_ms: 100
+      cpu_blocked_ms: 100,
+      io_wait_ms: 100,
+      optimization: 'worker_threads'
     });
   } catch (err) {
     logger.error(err);

@@ -398,4 +398,55 @@ docker exec chaos-nodejs tc qdisc del dev eth0 root
 
 ---
 
+## 📝 学習ノート
+
+### Node.js パフォーマンス最適化
+
+#### Piscina について
+
+**URL:** https://github.com/piscinajs/piscina
+
+**何か:**
+- Node.js 用のワーカースレッドプール管理ライブラリ
+- worker_threads を手動で管理する複雑性を隠蔽
+- 本番環境で使用されるベストプラクティス実装
+
+**使い方:**
+```typescript
+import Piscina from 'piscina';
+const pool = new Piscina({ filename: './worker.js', maxThreads: 4 });
+const result = await pool.run({ data: 'input' });
+```
+
+**学習価値:**
+- Scenario 1 で手書きしたワーカープール（80行）が何をやっているかが理解できる
+- 実務では Piscina を使うが、「裏で何が起きているか」を理解してから使う方が実装判断力が上がる
+- 類似ライブラリ: `node-worker-threads-pool`, `node-fpcalc`
+
+#### Node.js チューニングパターン
+
+**Event Loop ブロック対策：3つのアプローチ**
+1. worker_threads（CPU 計算オフロード）→ Scenario 1 で実装 ✅
+2. Cluster モジュール（マルチプロセス） → 未実装
+3. 非同期ジョブキュー（Sidekiq 相当）→ 未実装
+
+**Next.js での実装例:**
+```typescript
+// pages/api/heavy.ts
+import Piscina from 'piscina';
+const pool = new Piscina({ filename: './worker.js' });
+
+export default async function handler(req, res) {
+  const result = await pool.run(req.body);
+  res.json(result);
+}
+```
+
+**計測結果（Scenario 1）:**
+- Event Loop ブロック時: P95 3.92s（実測）
+- worker_threads 最適化後: P95 204.72ms（実測）
+- 改善率: 95% 削減
+
+---
+
 **最後に:** このラボは「実践」が全て。手を動かし、計測し、改善する。その過程で、パフォーマンス最適化のメソッドが身につきます！🚀
