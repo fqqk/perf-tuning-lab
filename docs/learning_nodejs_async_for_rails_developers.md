@@ -681,6 +681,112 @@ async function safeFlow() {
 
 ---
 
+## 8. API 設計への応用：REST 粒度と Promise.all
+
+### 背景：バックエンドが画面に合わせる vs REST 粒度を守る
+
+**疑問ポイント：**
+- 「フロント側で何回も API 叩く必要が出るから、バック側でまとめて返すべき」
+- vs
+- 「REST 単位で適切に分けて、フロント側で Promise.all で並行実行すれば同じ」
+
+### 複数リクエスト ≠ 遅い
+
+```javascript
+// ❌ シリアル実行（遅い）
+const user = await fetch('/api/users/:id');          // 100ms
+const posts = await fetch('/api/users/:id/posts');   // 100ms
+const followers = await fetch('/api/users/:id/followers');  // 100ms
+// 合計: 300ms
+
+// ✅ Promise.all で並行実行（速い）
+const [user, posts, followers] = await Promise.all([
+  fetch('/api/users/:id'),
+  fetch('/api/users/:id/posts'),
+  fetch('/api/users/:id/followers')
+]);
+// 合計: 100ms（シリアルと比べて 70% 削減）
+```
+
+**つまり：「複数リクエスト」が遅いのではなく、「シリアル実行」が遅いだけ。**
+
+### REST 粒度を守るメリット
+
+```
+❌ バックエンドが画面に合わせたモノリシック API
+
+GET /api/user-profile/:id
+  → user, posts, followers, notifications, settings 全部返す
+
+問題：
+- モバイル画面は「user と posts だけ」必要（Over-fetching）
+- 新しい画面が追加される度に API を変更（保守困難）
+- キャッシング戦略が立てづらい（すべて一度に更新）
+
+
+✅ REST 単位で適切に分ける
+
+GET /api/users/:id              // ユーザー情報
+GET /api/users/:id/posts        // 投稿一覧
+GET /api/users/:id/followers    // フォロワー数
+GET /api/users/:id/notifications // 通知
+GET /api/users/:id/settings     // 設定
+
+メリット：
+- モバイルは「user + posts」だけ取得 → 通信量削減
+- 新しい画面が出ても既存 API は変更不要
+- 各リソースで独立したキャッシング制御可能
+- Web / モバイル / ダッシュボード / 外部連携
+  → 各クライアントが「必要な部分組み合わせ」で対応
+```
+
+### キャッシング戦略との相性
+
+REST 粒度が小さいほど、各リソースのキャッシュを独立制御：
+
+```javascript
+// user は 1時間キャッシュ（ほぼ変わらない）
+SET CACHE user:{id} EX 3600
+
+// posts は 10分キャッシュ（更新頻度高い）
+SET CACHE user:{id}:posts EX 600
+
+// followers は 24時間キャッシュ（ほぼ不変）
+SET CACHE user:{id}:followers EX 86400
+```
+
+すべて 1 つの API なら、1 つの TTL で全部更新されるため、戦略が立てづらい。
+
+### SoC（Separation of Concerns）
+
+```
+バックエンド層
+  └─ ビジネスロジック定義
+      「ユーザーとは？」「投稿とは？」
+
+フロント層
+  └─ プレゼンテーション
+      「どの画面に何を表示？」
+
+→ 両者は独立設計すべき
+```
+
+### GraphQL との比較
+
+```
+GraphQL:
+  長所: 1リクエストで「必要なフィールドだけ」取得
+  短所: キャッシング複雑、N+1 問題対策必要
+
+REST + Promise.all:
+  長所: シンプル、キャッシング容易、理解しやすい
+  短所: フロント側で複数リクエスト管理（Promise.all で解決）
+
+結論: 小〜中規模なら REST + Promise.all で十分
+```
+
+---
+
 ## 参考資料
 
 - [MDN - Promise](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise)
