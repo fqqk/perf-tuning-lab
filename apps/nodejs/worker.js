@@ -5,6 +5,7 @@
  * CPU バウンド処理を別スレッドで実行
  */
 
+// parentPortは、Worker Thread とメインスレッド間の通信を行うためのオブジェクトです。
 const { parentPort } = require('worker_threads');
 
 parentPort.on('message', (message) => {
