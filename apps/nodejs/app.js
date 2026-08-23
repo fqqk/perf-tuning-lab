@@ -2,6 +2,7 @@ const express = require('express');
 const compression = require('compression');
 const pino = require('pino');
 const { Worker } = require('worker_threads');
+const { Pool } = require('pg');
 const path = require('path');
 const os = require('os');
 
@@ -10,6 +11,21 @@ const logger = pino();
 
 // Middleware
 app.use(compression());
+
+// ============================================================
+// PostgreSQL Connection Pool: Scenario 2 用
+// ============================================================
+
+const pool = new Pool({
+  host: process.env.DB_HOST || 'chaos-postgres',
+  port: process.env.DB_PORT || 5432,
+  user: process.env.DB_USER || 'chaos_user',
+  password: process.env.DB_PASSWORD || 'chaos_password',
+  database: process.env.DB_NAME || 'chaos_lab',
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000
+});
 
 // ============================================================
 // Worker Pool: CPU 計算用
@@ -151,6 +167,86 @@ app.get('/serialize-heavy', (req, res) => {
     data: largeData,
     serialize_time_ms: Date.now() - startSerialize
   });
+});
+
+// ============================================================
+// Scenario 2: DB層のボトルネック（Connection Pool / Lock 競合）
+// ============================================================
+
+/**
+ * GET /db-write?user_id=1&amount=100
+ *
+ * 同一レコードへの並行 UPDATE を実行
+ * - Lock 競合：複数のリクエストが同じ user_id をロック待ち
+ * - Connection Pool 枯渇：接続数不足でタイムアウト
+ *
+ * 期待値：
+ * - VU 10 で全て user_id=1 を更新 → P95 Latency が大幅悪化（複数 Lock 待ち）
+ * - Connection Pool 限度到達 → タイムアウトエラー増加
+ */
+app.get('/db-write', async (req, res) => {
+  const startTime = Date.now();
+  const userId = parseInt(req.query.user_id) || 1;
+  const amount = parseInt(req.query.amount) || 100;
+
+  let client;
+  try {
+    client = await pool.connect();
+
+    // トランザクション開始
+    await client.query('BEGIN');
+
+    // この行をロック（他のトランザクションは待機）
+    const selectResult = await client.query(
+      'SELECT id, balance FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+
+    if (selectResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const currentBalance = selectResult.rows[0].balance;
+
+    // ロック保持時間を意図的に延ばす（Lock 競合を観察するため）
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 更新実行
+    await client.query(
+      'UPDATE users SET balance = $1 WHERE id = $2',
+      [currentBalance - amount, userId]
+    );
+
+    // コミット（ロック解放）
+    await client.query('COMMIT');
+
+    res.json({
+      status: 'ok',
+      user_id: userId,
+      previous_balance: currentBalance,
+      new_balance: currentBalance - amount,
+      total_time_ms: Date.now() - startTime
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackErr) {
+        logger.error('Rollback error:', rollbackErr);
+      }
+    }
+
+    logger.error('DB error:', err);
+    res.status(500).json({
+      error: err.message,
+      code: err.code
+    });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
 });
 
 /**

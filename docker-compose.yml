@@ -58,7 +58,28 @@ services:
         limits:
           cpus: '1.0'
           memory: 512M
-    command: sh -c "apk add --no-cache iproute2 && go run main.go"
+    command: sh -c "apk add --no-cache iproute2 && go mod tidy && go run main.go"
+
+  # ============================================================
+  # PostgreSQL: Scenario 2 用（Connection Pool / Lock 競合観察）
+  # ============================================================
+  chaos-postgres:
+    image: postgres:16-alpine
+    container_name: chaos-postgres
+    environment:
+      POSTGRES_USER: chaos_user
+      POSTGRES_PASSWORD: chaos_password
+      POSTGRES_DB: chaos_lab
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./apps/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chaos_user -d chaos_lab"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # モニタリング (オプション)
   prometheus:
@@ -79,3 +100,6 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - ./monitoring/grafana:/var/lib/grafana
+
+volumes:
+  postgres_data:

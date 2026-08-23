@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	_ "github.com/lib/pq"
 )
 
 // ============================================================
@@ -23,6 +28,9 @@ var (
 	cacheMutex sync.Mutex
 
 	startTime = time.Now()
+
+	// PostgreSQL Connection Pool: Scenario 2 用
+	db *sql.DB
 )
 
 func main() {
@@ -31,8 +39,57 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
 
+	// PostgreSQL 接続初期化
+	dbHost := os.Getenv("DB_HOST")
+	if dbHost == "" {
+		dbHost = "chaos-postgres"
+	}
+	dbPort := os.Getenv("DB_PORT")
+	if dbPort == "" {
+		dbPort = "5432"
+	}
+	dbUser := os.Getenv("DB_USER")
+	if dbUser == "" {
+		dbUser = "chaos_user"
+	}
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		dbPassword = "chaos_password"
+	}
+	dbName := os.Getenv("DB_NAME")
+	if dbName == "" {
+		dbName = "chaos_lab"
+	}
+
+	psqlInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=5",
+		dbHost, dbPort, dbUser, dbPassword, dbName)
+	var err error
+	db, err = sql.Open("postgres", psqlInfo)
+	if err != nil {
+		log.Printf("Error: Failed to open PostgreSQL connection: %v\n", err)
+		db = nil
+	} else {
+		db.SetMaxOpenConns(10)
+		db.SetMaxIdleConns(2)
+		db.SetConnMaxLifetime(time.Minute)
+
+		// Ping to verify connection
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := db.PingContext(ctx); err != nil {
+			log.Printf("Error: DB ping failed: %v\n", err)
+			db.Close()
+			db = nil
+		}
+		cancel()
+
+		if db != nil {
+			log.Println("PostgreSQL connected successfully")
+		}
+	}
+
 	// HTTP ハンドラー登録
 	http.HandleFunc("/cpu-io-mixed", handleCpuIoMixed)
+	http.HandleFunc("/db-write", handleDbWrite)
 	http.HandleFunc("/leak", handleLeak)
 	http.HandleFunc("/serialize-heavy", handleSerializeHeavy)
 	http.HandleFunc("/health", handleHealth)
@@ -97,6 +154,114 @@ func cpuIntensiveWork() float64 {
 		result += math.Sqrt(float64(i))
 	}
 	return result
+}
+
+// ============================================================
+// Scenario 2: DB層のボトルネック（Connection Pool / Lock 競合）
+// ============================================================
+
+/*
+GET /db-write?user_id=1&amount=100
+
+同一レコードへの並行 UPDATE を実行
+- Lock 競合：複数のリクエストが同じ user_id をロック待ち
+- Connection Pool 枯渇：接続数不足でタイムアウト
+
+期待値：
+- VU 10 で全て user_id=1 を更新 → P95 Latency が大幅悪化（複数 Lock 待ち）
+- Connection Pool 限度到達 → タイムアウトエラー増加
+*/
+func handleDbWrite(w http.ResponseWriter, r *http.Request) {
+	if db == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Database not initialized",
+		})
+		return
+	}
+
+	startTime := time.Now()
+
+	userId := 1
+	if u := r.URL.Query().Get("user_id"); u != "" {
+		fmt.Sscanf(u, "%d", &userId)
+	}
+
+	amount := 100
+	if a := r.URL.Query().Get("amount"); a != "" {
+		fmt.Sscanf(a, "%d", &amount)
+	}
+
+	tx, err := db.BeginTx(r.Context(), nil)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+	defer tx.Rollback()
+
+	// この行をロック（他のトランザクションは待機）
+	var id, balance int
+	err = tx.QueryRowContext(r.Context(),
+		"SELECT id, balance FROM users WHERE id = $1 FOR UPDATE",
+		userId).Scan(&id, &balance)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "User not found",
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// ロック保持時間を意図的に延ばす（Lock 競合を観察するため）
+	time.Sleep(100 * time.Millisecond)
+
+	// 更新実行
+	_, err = tx.ExecContext(r.Context(),
+		"UPDATE users SET balance = $1 WHERE id = $2",
+		balance-amount, userId)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// コミット
+	err = tx.Commit()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":            "ok",
+		"user_id":           userId,
+		"previous_balance":  balance,
+		"new_balance":       balance - amount,
+		"total_time_ms":     time.Since(startTime).Milliseconds(),
+		"current_goroutine": runtime.NumGoroutine(),
+	})
 }
 
 // ============================================================
